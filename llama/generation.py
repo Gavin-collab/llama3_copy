@@ -146,25 +146,36 @@ class Llama:
             If logprobs is True, token log probabilities are computed for each generated token.
 
         """
+
+        # prompt tokens are multiple lists. 
         params = self.model.params
         bsz = len(prompt_tokens)
+        # len(prompt tokens) = batch size
         assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
 
         min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
-        assert max_prompt_len <= params.max_seq_len
-        total_len = min(params.max_seq_len, max_gen_len + max_prompt_len)
 
+        # no prompts can exceed the required sequence length
+        assert max_prompt_len <= params.max_seq_len
+        # get the smaller one of the max sequence length and the sum of output length and input length
+        total_len = min(params.max_seq_len, max_gen_len + max_prompt_len)
+        
         pad_id = self.tokenizer.pad_id
+        # pad the prompt tokens into size (bsz, total_len)
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
+        
         for k, t in enumerate(prompt_tokens):
+            # tensor-ize each prompt
             tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
         if logprobs:
+            # if logprobs is needed, create a tensor of zeros which has the same shape tokens
             token_logprobs = torch.zeros_like(tokens, dtype=torch.float)
-
+        
         prev_pos = 0
         eos_reached = torch.tensor([False] * bsz, device="cuda")
         input_text_mask = tokens != pad_id
+        # if the shortest prompt has the same size of the total length
         if min_prompt_len == total_len:
             logits = self.model.forward(tokens, prev_pos)
             token_logprobs = -F.cross_entropy(
@@ -176,19 +187,21 @@ class Llama:
 
         stop_tokens = torch.tensor(list(self.tokenizer.stop_tokens))
 
+        # for all positions in 
         for cur_pos in range(min_prompt_len, total_len):
+            # predict on a selected chunk of tokens
             logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p)
             else:
                 next_token = torch.argmax(logits[:, -1], dim=-1)
-
             next_token = next_token.reshape(-1)
             # only replace token if prompt has already been generated
             next_token = torch.where(
                 input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
             )
+            # 
             tokens[:, cur_pos] = next_token
             if logprobs:
                 token_logprobs[:, prev_pos + 1 : cur_pos + 1] = -F.cross_entropy(
